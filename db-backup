@@ -1,0 +1,133 @@
+#!/bin/bash
+timenow=$(date +%F_%T)
+echo "Beginning backup script at $timenow"
+
+# Setup the env variables to be used throughout the script.
+connected="false"
+
+# Refers to the .ovpn client configuration file.
+vpn_client=${VPN_CLIENT}
+
+# Refers to an auth file containing vpn creds.
+vpn_auth=${VPN_AUTH}
+
+# Create a function that will return the status of the openVPN connection.
+function checkvpn {
+ val=$(ps -e | grep openvpn)
+ if [[ -z $val ]]; then
+   connected="false"
+ else
+   connected="true"
+ fi
+}
+
+# First check if the VPN service is already running.
+checkvpn
+if [[ $connected != "true" ]]; then
+ # Lets connect to the VPN using open vpn as a daemon.
+ echo "Attemping to connect to VPN"
+
+ # Start the openvpn service.
+ sudo openvpn --config "$vpn_client" --auth-user-pass "$vpn_auth" --daemon
+ if [ $? != 0 ]; then
+   echo "VPN failed to connect, exiting."
+   exit $?
+ fi
+fi
+
+# We need to wait some time to attempt connection to SSH.
+counter=0
+while [ \( $connected != "true" \) -a \( $counter -lt 10 \) ]; do
+ sleep 1
+ checkvpn
+ (( counter=counter+1 ))
+done
+
+if [[ counter -eq 10 ]]; then 
+ echo "VPN failed to connect, exiting."
+ exit 2
+fi
+
+# We have established the connection (or it was already established).
+# Lets continue.
+echo "Give the VPN some time to establish connection..."
+sleep 5
+
+# Now start the backup.
+echo "Continuing with the backup."
+
+# Create a function that can be used to kill the vpn connection before 
+# exit.
+function killvpn {
+sudo killall openvpn
+}
+
+# Create a function that will be used to exit on error.
+function checkerr {
+ if [[ $? != 0 ]]; then
+   echo "Error occurred when backing up."
+   killvpn
+   exit 2
+ fi
+}
+
+# Set some local vars to be used for backing up.
+prod_db_host=${DB_HOST}
+prod_db_user=${DB_USERNAME}
+prod_db_pass=${DB_PASSWORD}
+outfile="$timenow.sql.gz"
+
+# Utilise the mysqldump tool to publish the backup into a new file.
+mysqldump \
+--user=$prod_db_user \
+--password=$prod_db_pass \
+--host=$prod_db_host \
+--port=3306 \
+--debug-info \
+--dump-date \
+--complete-insert \
+--disable-keys \
+--create-options \
+--add-locks \
+--single-transaction \
+--all-databases \
+-v 2>/dev/null \
+| gzip > "$outfile"
+checkerr
+
+# This will be the passphrase for the backup file, on top of the provided gpg
+# public/private keypair denoted by the --recipient flag.
+pass=${BACKUP_PHRASE}
+keypair=${ENC_KEYPAIR}
+
+# Encrypt the local file.
+echo "Encrypting the backup for safekeeping."
+echo "$pass" | gpg --passphrase-fd 0 --batch --yes --encrypt --recipient "$keypair" --symmetric "$outfile"
+checkerr
+
+# Cleanup the non encrypted file.
+echo "Cleaning up the plaintext file."
+srm $outfile
+
+# Set the bucket location for backing up to s3. This requires the same access
+# that the s3 cli uses, so ensure its setup to work.
+bucket=${BACKUP_BUCKET}
+
+# Upload the file to S3 for safekeeping, and copy to a local backup location.
+outfile=$outfile.gpg
+echo "Uploading to s3."
+aws s3 cp "$outfile" "$bucket/$outfile"
+checkerr
+
+echo "Upload complete."
+
+echo "Moving backup to folder."
+mv "$outfile" ~/backups/
+
+# Cleanup and exit.
+echo "Backup completed for $timenow."
+echo "Closing connection to vpn."
+killvpn
+
+# Success.
+exit 0
