@@ -121,8 +121,9 @@ checkerr
 
 echo "Upload complete."
 
+backup_f=${LOCAL_BACKUP}
 echo "Moving backup to folder."
-mv "$outfile" ~/backups/
+mv "$outfile" "$backup_f"
 
 # Cleanup and exit.
 echo "Backup completed for $timenow."
