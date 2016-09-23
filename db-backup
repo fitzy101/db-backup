@@ -107,7 +107,7 @@ checkerr
 
 # Cleanup the non encrypted file.
 echo "Cleaning up the plaintext file."
-srm $outfile
+srm -f $outfile
 
 # Set the bucket location for backing up to s3. This requires the same access
 # that the s3 cli uses, so ensure its setup to work.
